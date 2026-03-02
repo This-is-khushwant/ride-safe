@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body{font-family:system-ui,sans-serif;margin:0;padding:10px;background:transparent;}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;}
+    .pill{padding:5px 11px;border-radius:999px;background:#f3f4f6;font-size:.82rem;}
+    .green{background:#dcfce7;color:#166534;}
+    .red{background:#fee2e2;color:#991b1b;}
+    .yellow{background:#fef9c3;color:#854d0e;}
+    button{padding:7px 14px;border-radius:9px;border:1px solid #d1d5db;background:white;cursor:pointer;}
+    button:disabled{opacity:.5;cursor:not-allowed;}
+    .warn{background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;
+          padding:8px 12px;font-size:.8rem;color:#92400e;margin-top:6px;display:none;}
+    .info{background:#eff6ff;border:1px solid #93c5fd;border-radius:8px;
+          padding:8px 12px;font-size:.8rem;color:#1e40af;margin-top:6px;}
+  </style>
+</head>
+<body>
+  <div class="row">
+    <button id="btn">Enable sensors</button>
+    <span id="st" class="pill">status: idle</span>
+    <span id="md" class="pill">stopped</span>
+    <span class="pill">Hz:<span id="hz">0</span></span>
+  </div>
+  <div id="dw" class="warn">
+    DeviceMotion not available on desktop.
+    Open this URL on your phone (Chrome Android or Safari iOS).
+  </div>
+  <div class="info">Keep phone screen on. iOS Safari requires tapping Enable sensors first.</div>
+
+<script>
+  // ── Streamlit component handshake ──────────────────────────────────────────
+  // This is the CORRECT two-way protocol. components.html() ignores postMessage;
+  // declare_component() requires this exact handshake first.
+  let CFG = {
+    riding: false, sampleHz: 50, windowSec: 5,
+    breakSec: 2, liveSendHz: 5
+  };
+
+  function sendMsg(type, value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: type,
+      value: value
+    }, "*");
+  }
+
+  function setComponentValue(val) {
+    sendMsg("streamlit:setComponentValue", val);
+  }
+
+  function sendReady() {
+    sendMsg("streamlit:componentReady", { apiVersion: 1 });
+  }
+
+  // Listen for config from Streamlit
+  window.addEventListener("message", function(e) {
+    if (e.data.type === "streamlit:render") {
+      const args = e.data.args || {};
+      CFG.riding     = !!args.riding;
+      CFG.sampleHz   = args.sample_hz   || 50;
+      CFG.windowSec  = args.window_sec  || 5;
+      CFG.breakSec   = args.break_sec   || 2;
+      CFG.liveSendHz = args.live_send_hz || 5;
+
+      if (CFG.riding && permissionGranted) {
+        if (!sT) startCapture();
+      } else if (!CFG.riding) {
+        stopCapture();
+      }
+    }
+  });
+
+  // ── UI elements ────────────────────────────────────────────────────────────
+  const E = {
+    btn: document.getElementById("btn"),
+    st:  document.getElementById("st"),
+    md:  document.getElementById("md"),
+    hz:  document.getElementById("hz"),
+    dw:  document.getElementById("dw"),
+  };
+
+  function setSt(t, c) {
+    E.st.textContent = "status: " + t;
+    E.st.className = "pill" + (c ? " " + c : "");
+  }
+  function setMd(t) { E.md.textContent = t; }
+
+  // ── Sensor state ───────────────────────────────────────────────────────────
+  let permissionGranted = false;
+  let acc = {x:0,y:0,z:0}, gyr = {x:0,y:0,z:0}, lastEvt = 0;
+  const now = () => Date.now();
+  const cl  = v => { const n = Number(v); return isFinite(n) ? n : 0; };
+
+  function onMotion(e) {
+    lastEvt = now();
+    const a = e.accelerationIncludingGravity || e.acceleration || {};
+    acc = { x:cl(a.x), y:cl(a.y), z:cl(a.z) };
+    const r = e.rotationRate || {};
+    gyr = { x:cl(r.beta), y:cl(r.gamma), z:cl(r.alpha) };
+  }
+
+  async function reqPerm() {
+    try {
+      if (typeof DeviceMotionEvent !== "undefined" &&
+          typeof DeviceMotionEvent.requestPermission === "function") {
+        if (await DeviceMotionEvent.requestPermission() !== "granted") throw 0;
+      }
+      permissionGranted = true;
+      setSt("sensors active", "green");
+      return true;
+    } catch(e) {
+      permissionGranted = false;
+      setSt("permission denied", "red");
+      return false;
+    }
+  }
+
+  // ── Capture loop ───────────────────────────────────────────────────────────
+  let sT=null, lT=null, bT=null, wT=null;
+  let ws=[], sc=0, wsMs=0, lhMs=0;
+
+  function clrT() {
+    [sT, lT].forEach(t => t && clearInterval(t));
+    [bT, wT].forEach(t => t && clearTimeout(t));
+    sT = lT = bT = wT = null;
+  }
+
+  function startCapture() {
+    clrT();
+    ws=[]; sc=0; wsMs=now(); lhMs=wsMs;
+    setMd("capturing"); setSt("capturing...", "yellow");
+
+    const sm = Math.max(5,  Math.round(1000 / CFG.sampleHz));
+    const lm = Math.max(50, Math.round(1000 / CFG.liveSendHz));
+
+    sT = setInterval(() => {
+      ws.push([acc.x, acc.y, acc.z, gyr.x, gyr.y, gyr.z]);
+      sc++;
+      const t = now();
+      if (t - lhMs >= 1000) {
+        const s = (t - wsMs) / 1000;
+        E.hz.textContent = s > 0 ? (sc/s).toFixed(1) : "0";
+        lhMs = t;
+      }
+    }, sm);
+
+    lT = setInterval(() => {
+      setComponentValue({
+        type:"live", t_ms:now(),
+        ax:acc.x, ay:acc.y, az:acc.z,
+        gx:gyr.x, gy:gyr.y, gz:gyr.z
+      });
+    }, lm);
+
+    wT = setTimeout(() => {
+      setSt("sending...", "yellow");
+      setComponentValue({ type:"window", t_ms:now(), samples:ws });
+      clrT();
+      setMd("break"); setSt("waiting...");
+      bT = setTimeout(() => {
+        if (CFG.riding) startCapture();
+      }, Math.max(0, CFG.breakSec) * 1000);
+    }, Math.max(1, CFG.windowSec) * 1000);
+  }
+
+  function stopCapture() {
+    clrT(); setMd("stopped"); setSt("idle"); E.hz.textContent = "0";
+  }
+
+  function attach() {
+    window.removeEventListener("devicemotion", onMotion);
+    window.addEventListener("devicemotion", onMotion, {passive:true});
+  }
+
+  E.btn.addEventListener("click", async () => {
+    setSt("requesting...");
+    if (await reqPerm()) { attach(); if (CFG.riding) startCapture(); }
+  });
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  (function init() {
+    if (typeof DeviceMotionEvent === "undefined") {
+      E.dw.style.display = "block";
+      setSt("not available on desktop", "red");
+      E.btn.disabled = true;
+    } else if (typeof DeviceMotionEvent.requestPermission !== "function") {
+      // Android Chrome — no prompt needed
+      permissionGranted = true;
+      attach();
+      setSt("sensors active", "green");
+    } else {
+      setSt("tap Enable to start", "yellow");
+    }
+  })();
+
+  setInterval(() => {
+    if (permissionGranted && now() - lastEvt > 3000)
+      setSt("no events - screen locked?", "red");
+  }, 2000);
+
+  // Signal ready to Streamlit AFTER page loads
+  window.addEventListener("load", sendReady);
+  // Also send immediately in case load already fired
+  sendReady();
+</script>
+</body>
+</html>
